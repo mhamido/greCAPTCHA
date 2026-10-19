@@ -1,6 +1,11 @@
 import { z } from "zod";
 
-export const pdfEngines = ["cloudflare-ai", "mistral-ocr", "native"] as const;
+export const pdfEngines = [
+  "cloudflare-ai",
+  "mistral-ocr",
+  "native",
+  "local-text",
+] as const;
 export const pdfEngineSchema = z.enum(pdfEngines);
 export type PdfEngine = z.infer<typeof pdfEngineSchema>;
 

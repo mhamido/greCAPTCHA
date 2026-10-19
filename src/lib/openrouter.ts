@@ -1,5 +1,7 @@
 import "server-only";
 
+import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
+
 import { logOutgoing } from "@/lib/request-log";
 
 import {
@@ -39,6 +41,54 @@ function selfHostedModelId(modelId: string) {
     throw new Error("Invalid self-hosted model ID.");
   }
   return modelId.slice(SELF_HOSTED_MODEL_PREFIX.length);
+}
+
+function forceLocalTextExtraction() {
+  return process.env.LOCAL_LLM_FORCE_TEXT === "1";
+}
+
+const DEFAULT_LOCAL_DOCUMENT_MAX_CHARS = 60_000;
+
+export async function extractSelfHostedPdfText(file: File): Promise<string> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const document = await getDocument({
+    data: bytes,
+    useWorkerFetch: false,
+  }).promise;
+  const pages: string[] = [];
+  for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+    const page = await document.getPage(pageNumber);
+    const content = await page.getTextContent();
+    pages.push(
+      content.items
+        .map((item) =>
+          "str" in item && typeof item.str === "string" ? item.str : "",
+        )
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim(),
+    );
+  }
+  const text = pages.filter(Boolean).join("\n\n").trim();
+  if (!text) {
+    throw new Error(
+      "The self-hosted PDF extractor found no selectable text. Use OCR for scanned PDFs or an OpenRouter model with PDF processing.",
+    );
+  }
+  const maxChars = Number.parseInt(
+    process.env.LOCAL_LLM_MAX_DOCUMENT_CHARS ?? "",
+    10,
+  );
+  const limit =
+    Number.isFinite(maxChars) && maxChars > 0
+      ? maxChars
+      : DEFAULT_LOCAL_DOCUMENT_MAX_CHARS;
+  if (text.length > limit) {
+    throw new Error(
+      `The extracted manuscript is ${text.length.toLocaleString()} characters, above the self-hosted limit of ${limit.toLocaleString()}. Set LOCAL_LLM_MAX_DOCUMENT_CHARS higher only if the model has enough context, or use a PDF engine with chunking/OCR support.`,
+    );
+  }
+  return text;
 }
 
 export type OpenRouterModel = {
@@ -127,7 +177,6 @@ async function getSelfHostedModels(): Promise<OpenRouterModel[]> {
   }
 
   const payload = (await response.json()) as { data?: RawModel[] };
-  const supportsPdf = process.env.LOCAL_LLM_SUPPORTS_PDF === "1";
   return (payload.data ?? [])
     .filter((model): model is RawModel & { id: string } => Boolean(model.id))
     .map((model) => ({
@@ -135,7 +184,7 @@ async function getSelfHostedModels(): Promise<OpenRouterModel[]> {
       name: model.name ?? model.id,
       description: model.description,
       contextLength: model.context_length,
-      inputModalities: supportsPdf ? ["text", "file"] : ["text"],
+      inputModalities: ["text"],
       pricing: model.pricing,
       recommended: true,
     }));
@@ -405,11 +454,6 @@ async function callSelfHosted(input: {
 }) {
   const baseUrl = selfHostedBaseUrl();
   if (!baseUrl) throw new Error("LOCAL_LLM_BASE_URL is not configured.");
-  if (input.file && process.env.LOCAL_LLM_SUPPORTS_PDF !== "1") {
-    throw new Error(
-      "The selected self-hosted endpoint does not support PDF input. Set LOCAL_LLM_SUPPORTS_PDF=1 only when its model accepts OpenAI-compatible file content.",
-    );
-  }
 
   const content: Array<Record<string, unknown>> = [
     { type: "text", text: input.prompt },
@@ -474,7 +518,25 @@ async function callOpenRouter(input: {
   pdfEngine?: PdfEngine;
 }) {
   if (isSelfHostedModel(input.modelId)) {
-    return callSelfHosted(input);
+    if (!input.file || !forceLocalTextExtraction()) {
+      try {
+        return await callSelfHosted(input);
+      } catch (error) {
+        if (!input.file) throw error;
+        const manuscriptText = await extractSelfHostedPdfText(input.file);
+        return callSelfHosted({
+          ...input,
+          file: undefined,
+          prompt: `Submitted manuscript text:\n${manuscriptText}\n\n${input.prompt}`,
+        });
+      }
+    }
+    const manuscriptText = await extractSelfHostedPdfText(input.file);
+    return callSelfHosted({
+      ...input,
+      file: undefined,
+      prompt: `Submitted manuscript text:\n${manuscriptText}\n\n${input.prompt}`,
+    });
   }
   if (usesDirectGemini(input.modelId)) {
     return callGeminiDirect(input);

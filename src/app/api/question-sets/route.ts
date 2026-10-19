@@ -126,13 +126,14 @@ export async function POST(request: Request) {
 
     const selectedModel = (await getAvailableModels()).find((model) => model.id === modelId);
     if (!selectedModel) throw new Error("Choose a model from the configured model catalog.");
-    const effectivePdfEngine = usesDirectGemini(modelId) ? "native" : pdfEngine;
-    if (isSelfHostedModel(modelId) && effectivePdfEngine !== "native") {
-      throw new Error(
-        "Self-hosted models require native PDF processing. Set LOCAL_LLM_SUPPORTS_PDF=1 and choose a model that accepts PDF file content.",
-      );
-    }
-    if (effectivePdfEngine === "native" && !selectedModel.inputModalities.includes("file")) {
+    const effectivePdfEngine = usesDirectGemini(modelId)
+        ? "native"
+        : pdfEngine;
+    if (
+      effectivePdfEngine === "native" &&
+      !isSelfHostedModel(modelId) &&
+      !selectedModel.inputModalities.includes("file")
+    ) {
       throw new Error("The selected model does not advertise native PDF support.");
     }
 

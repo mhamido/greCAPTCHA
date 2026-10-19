@@ -353,14 +353,6 @@ export function ResearchCaptcha() {
 
   useEffect(() => {
     if (
-      selectedModel?.id.startsWith("self-hosted:") &&
-      selectedModel.inputModalities.includes("file") &&
-      pdfEngine !== "native"
-    ) {
-      setPdfEngine("native");
-      return;
-    }
-    if (
       pdfEngine === "native" &&
       selectedModel &&
       !selectedModel.id.startsWith("self-hosted:") &&
@@ -1918,6 +1910,7 @@ export function ResearchCaptcha() {
                 onChange={(event) => setPdfEngine(event.target.value as PdfEngine)}
               >
                 <option value="native">Native model processing</option>
+                <option value="local-text">Local text extraction — self-hosted models</option>
                 <option value="cloudflare-ai">Cloudflare AI — free extraction</option>
                 <option value="mistral-ocr">Mistral OCR — paid, best for scans</option>
               </select>

@@ -45,7 +45,8 @@ Minimum `.env.local` configuration:
 OPENROUTER_API_KEY=your_key_here
 # LOCAL_LLM_BASE_URL=http://localhost:8000/v1
 # LOCAL_LLM_API_KEY=
-# LOCAL_LLM_SUPPORTS_PDF=0
+# LOCAL_LLM_FORCE_TEXT=0
+# LOCAL_LLM_MAX_DOCUMENT_CHARS=60000
 DATABASE_URL=./data/research-captcha.db
 ```
 
@@ -54,10 +55,27 @@ When `LOCAL_LLM_BASE_URL` is configured, models returned by its
 `POST /v1/chat/completions` and JSON-schema response formats. Self-hosted model IDs are
 prefixed with `self-hosted:` internally so they cannot collide with OpenRouter IDs.
 
-Most vLLM deployments are text-only and cannot consume a PDF. In that case, use an OpenRouter
-model for generation, or deploy a self-hosted multimodal model/API that accepts the OpenAI
-compatible `file` content shape and set `LOCAL_LLM_SUPPORTS_PDF=1`. The application rejects
-PDF requests to a self-hosted endpoint unless that flag is explicitly enabled.
+Self-hosted endpoints receive the PDF directly first. If the request fails, greCAPTCHA extracts
+selectable text locally and retries the request without the PDF. Set `LOCAL_LLM_FORCE_TEXT=1`
+to skip the first attempt when the endpoint is known to be text-only. Scanned PDFs still require
+OCR.
+
+### Local Phi-4 Mini test server
+
+The repository includes a small llama.cpp launcher for Microsoft Phi-4 Mini Instruct:
+
+```bash
+python3 -m pip install "llama-cpp-python[server]" huggingface-hub
+python3 scripts/phi4_server.py
+```
+
+The launcher downloads the Q4_K_M GGUF model on first start (several GB), stores it under
+`models/`, and serves it at `http://127.0.0.1:8000/v1`. The local `.env.local` configuration
+points greCAPTCHA at this endpoint. Restart the Next.js app after changing environment variables.
+
+Phi-4 Mini Instruct is text-only. It will therefore use the fallback path, or the direct
+text-extraction path when `LOCAL_LLM_FORCE_TEXT=1`. `LOCAL_LLM_MAX_DOCUMENT_CHARS` limits the
+manuscript size sent to the model; increase it only if the model's context window allows it.
 
 For a deployment, also set:
 
