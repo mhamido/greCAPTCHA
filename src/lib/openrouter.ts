@@ -14,6 +14,32 @@ import {
 } from "@/lib/quiz";
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1";
+const SELF_HOSTED_MODEL_PREFIX = "self-hosted:";
+
+function selfHostedBaseUrl() {
+  const configured = process.env.LOCAL_LLM_BASE_URL?.trim().replace(/\/+$/, "");
+  if (!configured) return null;
+  return configured.endsWith("/v1") ? configured : `${configured}/v1`;
+}
+
+function selfHostedHeaders() {
+  const apiKey = process.env.LOCAL_LLM_API_KEY?.trim();
+  return {
+    ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+    "Content-Type": "application/json",
+  };
+}
+
+export function isSelfHostedModel(modelId: string) {
+  return modelId.startsWith(SELF_HOSTED_MODEL_PREFIX);
+}
+
+function selfHostedModelId(modelId: string) {
+  if (!isSelfHostedModel(modelId)) {
+    throw new Error("Invalid self-hosted model ID.");
+  }
+  return modelId.slice(SELF_HOSTED_MODEL_PREFIX.length);
+}
 
 export type OpenRouterModel = {
   id: string;
@@ -27,7 +53,6 @@ export type OpenRouterModel = {
   };
   recommended: boolean;
 };
-
 type RawModel = {
   id?: string;
   name?: string;
@@ -85,6 +110,53 @@ export async function getOpenRouterModels(): Promise<OpenRouterModel[]> {
     if (a.recommended !== b.recommended) return a.recommended ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
+}
+
+async function getSelfHostedModels(): Promise<OpenRouterModel[]> {
+  const baseUrl = selfHostedBaseUrl();
+  if (!baseUrl) return [];
+
+  const response = await logOutgoing("self-hosted", "GET /models", () =>
+    fetch(`${baseUrl}/models`, {
+      headers: selfHostedHeaders(),
+      signal: AbortSignal.timeout(15_000),
+    }),
+  );
+  if (!response.ok) {
+    throw new Error(`Self-hosted model catalog returned ${response.status}.`);
+  }
+
+  const payload = (await response.json()) as { data?: RawModel[] };
+  const supportsPdf = process.env.LOCAL_LLM_SUPPORTS_PDF === "1";
+  return (payload.data ?? [])
+    .filter((model): model is RawModel & { id: string } => Boolean(model.id))
+    .map((model) => ({
+      id: `${SELF_HOSTED_MODEL_PREFIX}${model.id}`,
+      name: model.name ?? model.id,
+      description: model.description,
+      contextLength: model.context_length,
+      inputModalities: supportsPdf ? ["text", "file"] : ["text"],
+      pricing: model.pricing,
+      recommended: true,
+    }));
+}
+
+/** Returns models from every configured provider. At least one provider must be configured. */
+export async function getAvailableModels(): Promise<OpenRouterModel[]> {
+  const providers = [
+    process.env.OPENROUTER_API_KEY ? getOpenRouterModels() : Promise.resolve([]),
+    getSelfHostedModels(),
+  ];
+  const results = await Promise.allSettled(providers);
+  const models = results.flatMap((result) => (result.status === "fulfilled" ? result.value : []));
+  if (models.length > 0) return models;
+
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  throw failure?.reason instanceof Error
+    ? failure.reason
+    : new Error("Configure OPENROUTER_API_KEY or LOCAL_LLM_BASE_URL.");
 }
 
 const fillResponseJsonSchema = {
@@ -324,6 +396,76 @@ async function callGeminiDirect(input: {
   }
 }
 
+async function callSelfHosted(input: {
+  modelId: string;
+  prompt: string;
+  responseSchema: object;
+  file?: File;
+  pdfEngine?: PdfEngine;
+}) {
+  const baseUrl = selfHostedBaseUrl();
+  if (!baseUrl) throw new Error("LOCAL_LLM_BASE_URL is not configured.");
+  if (input.file && process.env.LOCAL_LLM_SUPPORTS_PDF !== "1") {
+    throw new Error(
+      "The selected self-hosted endpoint does not support PDF input. Set LOCAL_LLM_SUPPORTS_PDF=1 only when its model accepts OpenAI-compatible file content.",
+    );
+  }
+
+  const content: Array<Record<string, unknown>> = [
+    { type: "text", text: input.prompt },
+  ];
+  if (input.file) {
+    const bytes = Buffer.from(await input.file.arrayBuffer());
+    content.push({
+      type: "file",
+      file: {
+        filename: input.file.name,
+        file_data: `data:application/pdf;base64,${bytes.toString("base64")}`,
+      },
+    });
+  }
+
+  const schema =
+    "schema" in input.responseSchema
+      ? input.responseSchema
+      : {
+          name: "research_captcha_response",
+          strict: true,
+          schema: input.responseSchema,
+        };
+  const response = await logOutgoing(
+    "self-hosted",
+    `POST /chat/completions model=${selfHostedModelId(input.modelId)}${input.file ? " with pdf" : ""}`,
+    () =>
+      fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: selfHostedHeaders(),
+        body: JSON.stringify({
+          model: selfHostedModelId(input.modelId),
+          messages: [{ role: "user", content }],
+          response_format: { type: "json_schema", json_schema: schema },
+          temperature: 0.2,
+        }),
+        signal: AbortSignal.timeout(180_000),
+      }),
+  );
+  const payload = (await response.json()) as {
+    error?: { message?: string };
+    choices?: Array<{ message?: { content?: unknown } }>;
+  };
+  if (!response.ok) {
+    throw new Error(
+      payload.error?.message ?? `Self-hosted LLM returned ${response.status}.`,
+    );
+  }
+  const text = extractTextContent(payload.choices?.[0]?.message?.content);
+  try {
+    return JSON.parse(text.replace(/^```json\s*|\s*```$/g, "")) as unknown;
+  } catch {
+    throw new Error("The selected self-hosted model returned malformed JSON.");
+  }
+}
+
 async function callOpenRouter(input: {
   modelId: string;
   prompt: string;
@@ -331,6 +473,9 @@ async function callOpenRouter(input: {
   file?: File;
   pdfEngine?: PdfEngine;
 }) {
+  if (isSelfHostedModel(input.modelId)) {
+    return callSelfHosted(input);
+  }
   if (usesDirectGemini(input.modelId)) {
     return callGeminiDirect(input);
   }

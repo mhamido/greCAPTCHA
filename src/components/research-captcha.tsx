@@ -353,8 +353,17 @@ export function ResearchCaptcha() {
 
   useEffect(() => {
     if (
+      selectedModel?.id.startsWith("self-hosted:") &&
+      selectedModel.inputModalities.includes("file") &&
+      pdfEngine !== "native"
+    ) {
+      setPdfEngine("native");
+      return;
+    }
+    if (
       pdfEngine === "native" &&
       selectedModel &&
+      !selectedModel.id.startsWith("self-hosted:") &&
       !selectedModel.inputModalities.includes("file")
     ) {
       setPdfEngine("cloudflare-ai");
@@ -1007,7 +1016,7 @@ export function ResearchCaptcha() {
 
   async function generateSet(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selectedModel) return setError("Choose an OpenRouter model.");
+    if (!selectedModel) return setError("Choose a model from the configured catalog.");
     if (blocks.length === 0) return setError("Add at least one question type.");
     const form = new FormData(event.currentTarget);
     // Checked before the upload starts, not after: the server can only refuse an oversized PDF
@@ -1857,7 +1866,7 @@ export function ResearchCaptcha() {
             <div className="field full">
               <span className="field-label field-label-row">
                 Evaluator model
-                <FieldHint text="Type to filter the live OpenRouter catalogue, then pick a model from the list. Recommended models are marked." />
+                <FieldHint text="Type to filter the configured model catalog, then pick a model. OpenRouter and self-hosted OpenAI-compatible models are supported." />
               </span>
               <div className="model-picker">
                 <input

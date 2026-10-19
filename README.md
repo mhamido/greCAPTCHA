@@ -26,7 +26,8 @@ If you use our work please cite it. A bibtex blurb is available [below](#please-
 
 ## Local setup
 
-Requirements: Node.js 20+ and an [OpenRouter](https://openrouter.ai/) API key.
+Requirements: Node.js 20+ and either an [OpenRouter](https://openrouter.ai/) API key or an
+OpenAI-compatible self-hosted LLM endpoint (for example, vLLM).
 
 ```bash
 npm install
@@ -40,9 +41,23 @@ checked-in Drizzle migrations run automatically on startup.
 Minimum `.env.local` configuration:
 
 ```dotenv
+# Choose one provider, or configure both.
 OPENROUTER_API_KEY=your_key_here
+# LOCAL_LLM_BASE_URL=http://localhost:8000/v1
+# LOCAL_LLM_API_KEY=
+# LOCAL_LLM_SUPPORTS_PDF=0
 DATABASE_URL=./data/research-captcha.db
 ```
+
+When `LOCAL_LLM_BASE_URL` is configured, models returned by its
+`GET /v1/models` endpoint appear alongside OpenRouter models. The endpoint must implement
+`POST /v1/chat/completions` and JSON-schema response formats. Self-hosted model IDs are
+prefixed with `self-hosted:` internally so they cannot collide with OpenRouter IDs.
+
+Most vLLM deployments are text-only and cannot consume a PDF. In that case, use an OpenRouter
+model for generation, or deploy a self-hosted multimodal model/API that accepts the OpenAI
+compatible `file` content shape and set `LOCAL_LLM_SUPPORTS_PDF=1`. The application rejects
+PDF requests to a self-hosted endpoint unless that flag is explicitly enabled.
 
 For a deployment, also set:
 
@@ -174,4 +189,3 @@ If you use our work please use the following citation:
   note          = {Justin Payan and B{\'a}lint Gyevn{\'a}r contributed equally.}
 }
 ```
-
