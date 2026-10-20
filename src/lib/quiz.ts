@@ -234,10 +234,12 @@ export type StudyTemplateSummary = {
   updatedAt: string;
 };
 
+// Trimmed on parse: placeholders are matched against IDs after trimming, and an untrimmed
+// answer would otherwise compare unequal to the same text as a distractor or a chip label.
 const generatedBlankSchema = z.object({
-  id: z.string().min(1),
-  answer: z.string().min(1),
-  distractors: z.array(z.string().min(1)),
+  id: z.string().trim().min(1),
+  answer: z.string().trim().min(1),
+  distractors: z.array(z.string().trim().min(1)),
 });
 
 export const generatedFillSetSchema = z.object({
@@ -276,8 +278,8 @@ export const generatedMultipleChoiceSetSchema = z.object({
     z.object({
       prompt: z.string().min(1),
       description: z.string().min(1),
-      answer: z.string().min(1),
-      distractors: z.array(z.string().min(1)).min(1),
+      answer: z.string().trim().min(1),
+      distractors: z.array(z.string().trim().min(1)).min(1),
       rationale: z.string().min(1),
     }),
   ),
@@ -609,41 +611,133 @@ function parseSegments(prompt: string, blankIds: Set<string>): QuestionSegment[]
   return segments;
 }
 
+const PLACEHOLDER_PATTERN = /\{\{([^{}]+)\}\}/g;
+
+function generationWarning(message: string) {
+  console.warn(`[generation warning] ${message}`);
+}
+
+/** Compares option text the same way fill-in-the-blank grading compares answers. */
+function sameOptionText(a: string, b: string) {
+  return (
+    a.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US") ===
+    b.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US")
+  );
+}
+
+/**
+ * Renames placeholders that match no declared blank onto the blanks no placeholder names, so a
+ * prompt that copied an example ID (such as `{{blank_id}}`) is still usable.
+ *
+ * A placeholder that already names a declared blank is never moved, so its answer key stays
+ * attached to the position the model chose. Strict mode accepts only the unambiguous case — one
+ * unknown placeholder and one unreferenced blank — because with several of each the pairing is a
+ * guess about which answer belongs in which gap. Duplicated or missing placeholders are left for
+ * `parseSegments` to reject; nothing is deleted from the prompt.
+ */
+function normalizeFillPrompt(prompt: string, blankIds: string[], strictMode: boolean): string {
+  const expected = new Set(blankIds);
+  const tokens = [...prompt.matchAll(PLACEHOLDER_PATTERN)].map((match) => match[1].trim());
+  const unknown = tokens.filter((token) => !expected.has(token));
+  if (unknown.length === 0) return prompt;
+
+  const unreferenced = blankIds.filter((id) => !tokens.includes(id));
+  const unambiguous = unknown.length === 1 && unreferenced.length === 1;
+  if (unknown.length > unreferenced.length || (strictMode && !unambiguous)) {
+    throw new Error(`Question references unknown blank "${unknown[0]}".`);
+  }
+  generationWarning(
+    `Mapping placeholder(s) ${unknown.map((token) => `{{${token}}}`).join(", ")} onto blank(s) ${unreferenced.slice(0, unknown.length).join(", ")}.`,
+  );
+  let next = 0;
+  return prompt.replace(PLACEHOLDER_PATTERN, (whole, rawId: string) =>
+    expected.has(rawId.trim()) ? whole : `{{${unreferenced[next++]}}}`,
+  );
+}
+
 export function prepareFillQuestions(
   generated: GeneratedFillSet,
   block: QuestionBlockConfig,
+  strictMode = true,
 ): StoredFillQuestion[] {
-  return generated.questions.map((question) => {
-    const ids = question.blanks.map((blank) => blank.id);
-    if (new Set(ids).size !== ids.length) {
-      throw new Error("A generated question contains duplicate blank IDs.");
-    }
-    const choices: QuizChoice[] = [];
-    const blanks = question.blanks.map((blank) => {
-      const answerChoice = { id: globalThis.crypto.randomUUID(), label: blank.answer.trim() };
-      choices.push(answerChoice);
-      for (const distractor of blank.distractors) {
-        choices.push({ id: globalThis.crypto.randomUUID(), label: distractor.trim() });
+  const prepared: StoredFillQuestion[] = [];
+  for (const question of generated.questions) {
+    try {
+      const ids = question.blanks.map((blank) => blank.id);
+      if (new Set(ids).size !== ids.length) {
+        throw new Error("A generated question contains duplicate blank IDs.");
       }
-      return {
+      const prompt = normalizeFillPrompt(question.prompt, ids, strictMode);
+
+      // Tolerant mode keeps a question whose prompt omits some blanks, minus those blanks. Strict
+      // mode keeps them all, so parseSegments rejects the question.
+      const represented = new Set(
+        [...prompt.matchAll(PLACEHOLDER_PATTERN)].map((match) => match[1].trim()),
+      );
+      let blanks = question.blanks;
+      if (!strictMode && represented.size < ids.length) {
+        blanks = blanks.filter((blank) => represented.has(blank.id));
+        generationWarning(
+          `Using ${blanks.length} of ${ids.length} generated blanks because the prompt did not contain every blank.`,
+        );
+        if (blanks.length === 0) {
+          throw new Error("The generated fill-in-the-blank prompt contains no usable blanks.");
+        }
+      }
+      const segments = parseSegments(prompt, new Set(blanks.map((blank) => blank.id)));
+
+      // All blanks of a question share one chip bank and grading compares labels, so a
+      // distractor equal to any answer or to another distractor would show up as a duplicate
+      // chip — and a second copy of a correct chip. Answers are kept even when two blanks share
+      // one, since each chip fills only one blank.
+      const choices: QuizChoice[] = blanks.map((blank) => ({
+        id: globalThis.crypto.randomUUID(),
+        label: blank.answer,
+      }));
+      const storedBlanks = blanks.map((blank, index) => ({
         id: blank.id,
-        answer: blank.answer.trim(),
-        correctChoiceId: answerChoice.id,
-      };
-    });
-    return {
-      type: "fill_blank" as const,
-      id: globalThis.crypto.randomUUID(),
-      blockId: block.id,
-      timeLimitSeconds: block.timeLimitSeconds,
-      warmup: block.warmup,
-      blockName: block.name,
-      description: question.description.trim(),
-      segments: parseSegments(question.prompt, new Set(ids)),
-      choices: shuffled(choices),
-      blanks,
-    };
-  });
+        answer: blank.answer,
+        correctChoiceId: choices[index].id,
+      }));
+      for (const blank of blanks) {
+        for (const distractor of blank.distractors) {
+          if (sameOptionText(distractor, blank.answer)) {
+            const message = "A generated blank repeats its correct answer as a distractor.";
+            if (strictMode) throw new Error(message);
+            generationWarning(`${message} Removing the duplicate distractor.`);
+            continue;
+          }
+          if (choices.some((choice) => sameOptionText(choice.label, distractor))) continue;
+          choices.push({ id: globalThis.crypto.randomUUID(), label: distractor });
+        }
+      }
+
+      prepared.push({
+        type: "fill_blank" as const,
+        id: globalThis.crypto.randomUUID(),
+        blockId: block.id,
+        timeLimitSeconds: block.timeLimitSeconds,
+        warmup: block.warmup,
+        blockName: block.name,
+        description: question.description.trim(),
+        segments,
+        choices: shuffled(choices),
+        blanks: storedBlanks,
+      });
+    } catch (error) {
+      if (strictMode) throw error;
+      generationWarning(
+        `Dropping malformed fill-in-the-blank question: ${
+          error instanceof Error ? error.message : "unknown validation error"
+        }`,
+      );
+    }
+  }
+  // Even tolerant mode refuses an empty card, rather than saving a set that silently lacks it.
+  if (prepared.length === 0) {
+    throw new Error("The generated fill-in-the-blank block contains no usable questions.");
+  }
+  return prepared;
 }
 
 export function prepareFreeResponseQuestions(
@@ -663,56 +757,73 @@ export function prepareFreeResponseQuestions(
   }));
 }
 
-/** Compares option text the same way fill-in-the-blank grading compares answers. */
-function sameOptionText(a: string, b: string) {
-  return (
-    a.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US") ===
-    b.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US")
-  );
-}
-
 export function prepareMultipleChoiceQuestions(
   generated: GeneratedMultipleChoiceSet,
   block: QuestionBlockConfig,
+  strictMode = true,
 ): StoredMultipleChoiceQuestion[] {
-  return generated.questions.map((question) => {
-    const answer = question.answer.trim();
-    const distractors = question.distractors.map((distractor) => distractor.trim());
-
-    // A distractor equal to the key leaves the item with two correct options, so reject
-    // the whole generation rather than storing an unanswerable question.
-    if (distractors.some((distractor) => sameOptionText(distractor, answer))) {
-      throw new Error("A generated question repeats its correct answer as a distractor.");
-    }
-    for (let index = 1; index < distractors.length; index += 1) {
-      if (
-        distractors
-          .slice(0, index)
-          .some((earlier) => sameOptionText(earlier, distractors[index]))
-      ) {
-        throw new Error("A generated question contains duplicate options.");
+  const maxDistractors =
+    block.type === "multiple_choice" ? block.optionsPerQuestion - 1 : Number.POSITIVE_INFINITY;
+  const prepared: StoredMultipleChoiceQuestion[] = [];
+  for (const question of generated.questions) {
+    try {
+      const answer = question.answer;
+      // A distractor equal to the key leaves the item with two correct options. Strict mode
+      // rejects the generation; tolerant mode removes the duplicate and keeps the question.
+      const distractors: string[] = [];
+      for (const distractor of question.distractors) {
+        const repeatsAnswer = sameOptionText(distractor, answer);
+        if (repeatsAnswer || distractors.some((earlier) => sameOptionText(earlier, distractor))) {
+          const message = repeatsAnswer
+            ? "A generated question repeats its correct answer as a distractor."
+            : "A generated question contains duplicate options.";
+          if (strictMode) throw new Error(message);
+          generationWarning(`${message} Removing the duplicate option.`);
+          continue;
+        }
+        distractors.push(distractor);
       }
-    }
+      if (distractors.length === 0) {
+        throw new Error("A generated question has no distinct distractors.");
+      }
+      if (distractors.length > maxDistractors) {
+        generationWarning(
+          `Keeping ${maxDistractors} of ${distractors.length} generated distractors.`,
+        );
+        distractors.length = maxDistractors;
+      }
 
-    const correctOption = { id: globalThis.crypto.randomUUID(), label: answer };
-    const options = shuffled([
-      correctOption,
-      ...distractors.map((label) => ({ id: globalThis.crypto.randomUUID(), label })),
-    ]);
-    return {
-      type: "multiple_choice" as const,
-      id: globalThis.crypto.randomUUID(),
-      blockId: block.id,
-      timeLimitSeconds: block.timeLimitSeconds,
-      warmup: block.warmup,
-      blockName: block.name,
-      description: question.description.trim(),
-      prompt: question.prompt.trim(),
-      options,
-      correctOptionId: correctOption.id,
-      rationale: question.rationale.trim(),
-    };
-  });
+      const correctOption = { id: globalThis.crypto.randomUUID(), label: answer };
+      const options = shuffled([
+        correctOption,
+        ...distractors.map((label) => ({ id: globalThis.crypto.randomUUID(), label })),
+      ]);
+      prepared.push({
+        type: "multiple_choice" as const,
+        id: globalThis.crypto.randomUUID(),
+        blockId: block.id,
+        timeLimitSeconds: block.timeLimitSeconds,
+        warmup: block.warmup,
+        blockName: block.name,
+        description: question.description.trim(),
+        prompt: question.prompt.trim(),
+        options,
+        correctOptionId: correctOption.id,
+        rationale: question.rationale.trim(),
+      });
+    } catch (error) {
+      if (strictMode) throw error;
+      generationWarning(
+        `Dropping malformed multiple-choice question: ${
+          error instanceof Error ? error.message : "unknown validation error"
+        }`,
+      );
+    }
+  }
+  if (prepared.length === 0) {
+    throw new Error("The generated multiple-choice block contains no usable questions.");
+  }
+  return prepared;
 }
 
 /** Normalizes the limit for question sets stored before soft timers existed. */

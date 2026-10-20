@@ -318,6 +318,7 @@ export function ResearchCaptcha() {
           const preferred =
             catalog.find((model) => model.id === "google/gemini-3.7-flash") ??
             catalog.find((model) => /anthropic\/claude.*sonnet/i.test(model.id)) ??
+            catalog.find((model) => model.id === "openrouter/free") ??
             catalog.find((model) => model.recommended) ??
             catalog[0] ??
             null;
@@ -351,16 +352,15 @@ export function ResearchCaptcha() {
     return () => window.clearTimeout(timer);
   }, [currentConfig, restored]);
 
-  useEffect(() => {
-    if (
-      pdfEngine === "native" &&
-      selectedModel &&
-      !selectedModel.id.startsWith("self-hosted:") &&
-      !selectedModel.inputModalities.includes("file")
-    ) {
-      setPdfEngine("cloudflare-ai");
-    }
-  }, [pdfEngine, selectedModel]);
+  // Flagged rather than silently switched to a parser engine, which made "Native model processing"
+  // look unselectable. Self-hosted models are exempt: the server falls back to extracted text.
+  const nativePdfWarning =
+    pdfEngine === "native" &&
+    selectedModel &&
+    !selectedModel.id.startsWith("self-hosted:") &&
+    !selectedModel.inputModalities.includes("file")
+      ? `Model ${selectedModel.name} does not support direct PDF inputs! Choose another PDF text extractor.`
+      : "";
 
   const filteredModels = useMemo(() => {
     const query = modelSearch.trim().toLowerCase();
@@ -1010,6 +1010,7 @@ export function ResearchCaptcha() {
     event.preventDefault();
     if (!selectedModel) return setError("Choose a model from the configured catalog.");
     if (blocks.length === 0) return setError("Add at least one question type.");
+    if (nativePdfWarning) return setError(nativePdfWarning);
     const form = new FormData(event.currentTarget);
     // Checked before the upload starts, not after: the server can only refuse an oversized PDF
     // once it has arrived, and over a tunnel that is minutes of waiting for a no.
@@ -1914,6 +1915,11 @@ export function ResearchCaptcha() {
                 <option value="cloudflare-ai">Cloudflare AI — free extraction</option>
                 <option value="mistral-ocr">Mistral OCR — paid, best for scans</option>
               </select>
+              {nativePdfWarning && (
+                <p className="error" role="alert">
+                  {nativePdfWarning}
+                </p>
+              )}
             </div>
 
             <div className="field">

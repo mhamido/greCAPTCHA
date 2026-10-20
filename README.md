@@ -43,6 +43,8 @@ Minimum `.env.local` configuration:
 ```dotenv
 # Choose one provider, or configure both.
 OPENROUTER_API_KEY=your_key_here
+# Keep strict validation for production; false permits recoverable local-model mismatches.
+# STRICT_MODE=true
 # LOCAL_LLM_BASE_URL=http://localhost:8000/v1
 # LOCAL_LLM_API_KEY=
 # LOCAL_LLM_FORCE_TEXT=0
@@ -55,27 +57,54 @@ When `LOCAL_LLM_BASE_URL` is configured, models returned by its
 `POST /v1/chat/completions` and JSON-schema response formats. Self-hosted model IDs are
 prefixed with `self-hosted:` internally so they cannot collide with OpenRouter IDs.
 
-Self-hosted endpoints receive the PDF directly first. If the request fails, greCAPTCHA extracts
-selectable text locally and retries the request without the PDF. Set `LOCAL_LLM_FORCE_TEXT=1`
-to skip the first attempt when the endpoint is known to be text-only. Scanned PDFs still require
-OCR.
+OpenRouter's `openrouter/free` router is also available in the model picker whenever an
+OpenRouter API key is configured. It automatically chooses an available free model. No free
+model accepts files natively, so pair it with a parser engine (Cloudflare AI, Mistral OCR or local
+text extraction); the generation screen warns when "Native model processing" is selected for any
+model without file input. Only some free models enforce JSON schemas, so requests ask OpenRouter
+to route only to providers supporting every request parameter. When a reply still does not match
+the expected format, the error names the model the router picked. Because the underlying model
+can change, generated output quality and supported capabilities may vary.
 
-### Local Phi-4 Mini test server
+Self-hosted endpoints receive the PDF directly first. If the endpoint rejects that request with an
+HTTP error, greCAPTCHA extracts selectable text locally and retries without the PDF; timeouts and
+malformed model output are reported as errors rather than retried. Set `LOCAL_LLM_FORCE_TEXT=1`
+to skip the first attempt when the endpoint is known to be text-only. Choosing the "Local text
+extraction" PDF engine does the same for any model, OpenRouter and direct Gemini included: only
+the extracted text is sent. Scanned PDFs still require OCR.
 
-The repository includes a small llama.cpp launcher for Microsoft Phi-4 Mini Instruct:
+Generation validation is controlled by `STRICT_MODE`, which defaults to `true`. With
+`STRICT_MODE=false`, mismatched question counts, option counts, and free-response rubric totals
+are logged as warnings and the model's output is used where it remains valid: surplus questions
+and options are cut to the configured counts, malformed items are dropped, and a card left with no
+usable question still fails generation. This is intended
+for testing small local models, not for production study data.
+
+### Local Qwen2.5 3B test server
+
+The repository includes a llama.cpp launcher for Qwen2.5 3B Instruct, selected to provide
+better generation quality while remaining practical on an M2 Mac with 8 GB of unified memory:
 
 ```bash
 python3 -m pip install "llama-cpp-python[server]" huggingface-hub
-python3 scripts/phi4_server.py
+python3 scripts/test_server.py
 ```
 
-The launcher downloads the Q4_K_M GGUF model on first start (several GB), stores it under
-`models/`, and serves it at `http://127.0.0.1:8000/v1`. The local `.env.local` configuration
-points greCAPTCHA at this endpoint. Restart the Next.js app after changing environment variables.
+The launcher downloads the Q4_K_M GGUF model on first start (about 2 GB), stores it under
+`models/`, and serves it at `http://127.0.0.1:8000/v1`. It uses the model's full native
+32k-token context with an 8-bit (`q8_0`) KV cache and a single server slot. Measured on an 8 GB
+M2, that costs about 0.7 GB beyond the ~1.8 GB of weights. Override with `LOCAL_LLM_CONTEXT` and
+`LOCAL_LLM_KV_TYPE` (`f16`, `q8_0` or `q4_0`) in the launcher's environment. The single slot
+keeps the manuscript cached between cards, so only the first card of a set pays to read it:
+about a minute for a 60,000-character manuscript on that machine. Self-hosted requests time out
+after `LOCAL_LLM_TIMEOUT_SECONDS` (default 600). The local `.env.local`
+configuration points greCAPTCHA at this endpoint. Restart the Next.js app after changing
+environment variables.
 
-Phi-4 Mini Instruct is text-only. It will therefore use the fallback path, or the direct
-text-extraction path when `LOCAL_LLM_FORCE_TEXT=1`. `LOCAL_LLM_MAX_DOCUMENT_CHARS` limits the
-manuscript size sent to the model; increase it only if the model's context window allows it.
+Qwen2.5 3B Instruct is text-only. The local configuration therefore sets
+`LOCAL_LLM_FORCE_TEXT=1`, avoiding a failed native-PDF request. `LOCAL_LLM_MAX_DOCUMENT_CHARS`
+limits the manuscript size sent to the model; increase it only if the model's context window
+allows it.
 
 For a deployment, also set:
 

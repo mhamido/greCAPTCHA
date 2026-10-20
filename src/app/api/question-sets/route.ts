@@ -10,6 +10,7 @@ import {
   generateQuestionBlock,
   getAvailableModels,
   isSelfHostedModel,
+  strictGenerationMode,
   usesDirectGemini,
 } from "@/lib/openrouter";
 import {
@@ -126,9 +127,10 @@ export async function POST(request: Request) {
 
     const selectedModel = (await getAvailableModels()).find((model) => model.id === modelId);
     if (!selectedModel) throw new Error("Choose a model from the configured model catalog.");
-    const effectivePdfEngine = usesDirectGemini(modelId)
-        ? "native"
-        : pdfEngine;
+    // Direct Gemini reads the PDF itself, so OpenRouter's parser engines do not apply. Local text
+    // extraction still does: it replaces the PDF before any provider sees the request.
+    const effectivePdfEngine =
+      usesDirectGemini(modelId) && pdfEngine !== "local-text" ? "native" : pdfEngine;
     if (
       effectivePdfEngine === "native" &&
       !isSelfHostedModel(modelId) &&
@@ -148,9 +150,17 @@ export async function POST(request: Request) {
         pdfEngine: effectivePdfEngine,
       });
       if (result.type === "fill_blank") {
-        questions.push(...prepareFillQuestions(result.generated, block));
+        questions.push(
+          ...prepareFillQuestions(result.generated, block, strictGenerationMode()),
+        );
       } else if (result.type === "multiple_choice") {
-        questions.push(...prepareMultipleChoiceQuestions(result.generated, block));
+        questions.push(
+          ...prepareMultipleChoiceQuestions(
+            result.generated,
+            block,
+            strictGenerationMode(),
+          ),
+        );
       } else {
         questions.push(...prepareFreeResponseQuestions(result.generated, block));
       }

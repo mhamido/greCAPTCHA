@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  serverExternalPackages: ["better-sqlite3"],
+  // pdfjs-dist is loaded from node_modules rather than bundled: webpack rewrites its Node-only
+  // code paths and its dynamically imported worker (see loadPdfJs in src/lib/openrouter.ts).
+  serverExternalPackages: ["better-sqlite3", "pdfjs-dist"],
 
   async redirects() {
     return [

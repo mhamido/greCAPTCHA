@@ -227,6 +227,7 @@ npm-debug.log*
 data/
 uploads/
 bak/
+models/
 
 # Migration mutex, created beside whatever DATABASE_URL points at
 *.migrate.lock
